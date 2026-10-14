@@ -188,6 +188,12 @@ start_server.ps1     เริ่ม server แบบไม่ใช้ Docker �
 test_client.py       สคริปต์ทดสอบ API
 ```
 
+## สัญญาอนุญาต
+
+โค้ดในรีโปนี้ใช้สัญญาอนุญาต [MIT](LICENSE)
+
+ตัวโมเดลไม่ได้อยู่ในรีโปนี้ (ดาวน์โหลดจาก Hugging Face ตอนรัน) และมีสัญญาอนุญาตของตัวเอง ดูหัวข้อเครดิตด้านล่าง
+
 ## เครดิต
 
 โมเดล [Pathumma-llm-vision-3.0.0-preview](https://huggingface.co/nectec/Pathumma-llm-vision-3.0.0-preview) พัฒนาโดย NECTEC เผยแพร่ภายใต้สัญญาอนุญาต Apache-2.0 ต่อยอดจาก Qwen3.5-2B ของทีม Qwen
