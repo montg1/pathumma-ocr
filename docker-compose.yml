@@ -1,0 +1,26 @@
+services:
+  ocr:
+    build: .
+    image: pathumma-ocr:latest
+    container_name: pathumma-ocr
+    ports:
+      # Local machine only by default. Set OCR_BIND=0.0.0.0 to expose it on the LAN.
+      - "${OCR_BIND:-127.0.0.1}:${OCR_PORT:-8000}:8000"
+    environment:
+      MAX_PIXELS: ${MAX_PIXELS:-2000000}
+      DEFAULT_MAX_TOKENS: ${DEFAULT_MAX_TOKENS:-2048}
+      MAX_PDF_PAGES: ${MAX_PDF_PAGES:-100}
+    volumes:
+      # model weights (~4.4 GB, downloaded on first start) + Triton kernel cache
+      - pathumma-data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  pathumma-data:

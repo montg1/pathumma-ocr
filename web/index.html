@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pathumma OCR</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --border: #dde2e8;
+    --accent: #2457d6; --accent-text: #ffffff; --accent-soft: #e9eefc;
+    --ok: #1f8a4c; --warn: #a86300; --err: #c62828; --drop: #f0f4ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --panel: #1a1e24; --text: #e6e9ee; --muted: #9aa5b4; --border: #2c323b;
+      --accent: #7096ff; --accent-text: #0d1220; --accent-soft: #1f2940;
+      --ok: #4cc983; --warn: #f0b04a; --err: #ff6b6b; --drop: #1b2232;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 "Leelawadee UI", "Noto Sans Thai", "Sarabun", system-ui, sans-serif;
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h1 span { color: var(--muted); font-weight: 400; font-size: 14px; margin-left: 6px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px;
+    max-width: 1400px; margin: 0 auto; padding: 16px 20px;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; display: flex; flex-direction: column; gap: 12px; min-width: 0;
+  }
+  .panel.dragover { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .label { font-size: 13px; color: var(--muted); margin: 0; }
+
+  /* left: images */
+  .dropzone {
+    flex: 1; min-height: 340px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; text-align: center; padding: 24px; cursor: pointer;
+    border: 2px dashed var(--border); border-radius: 8px; background: var(--drop);
+  }
+  .dropzone:hover, .dropzone:focus-visible { border-color: var(--accent); outline: none; }
+  .dropzone strong { font-size: 16px; }
+  .dropzone small { color: var(--muted); }
+  .preview {
+    display: flex; align-items: center; justify-content: center; min-height: 240px; max-height: 62vh;
+    background: var(--bg); border-radius: 8px; overflow: hidden;
+  }
+  .preview img { max-width: 100%; max-height: 62vh; object-fit: contain; display: block; }
+  .filename { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin: 0; }
+  .file-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #busy { color: var(--accent); }
+  .thumbs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .thumb {
+    position: relative; flex: none; width: 68px; height: 68px; padding: 0; border-radius: 6px; overflow: hidden;
+    border: 2px solid var(--border); background: var(--bg); cursor: pointer;
+  }
+  .thumb.active { border-color: var(--accent); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .badge {
+    position: absolute; left: 4px; bottom: 4px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+    font-size: 11px; line-height: 18px; text-align: center; color: #fff; background: var(--muted);
+  }
+  .thumb .badge.done { background: var(--ok); }
+  .thumb .badge.error { background: var(--err); }
+  .thumb .badge.running { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  .thumb .remove {
+    position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border: 0; border-radius: 50%;
+    background: rgba(0, 0, 0, .6); color: #fff; font-size: 13px; line-height: 20px; cursor: pointer; padding: 0;
+  }
+  .thumb.add { display: flex; align-items: center; justify-content: center; font-size: 26px; color: var(--muted); border-style: dashed; }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  /* right: prompt + result */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    border: 1px solid var(--border); background: transparent; border-radius: 999px; padding: 3px 12px;
+    font-size: 13px; cursor: pointer;
+  }
+  .chip:hover { background: var(--accent-soft); border-color: var(--accent); }
+  textarea {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+    padding: 10px 12px; resize: vertical;
+  }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  details { font-size: 13px; color: var(--muted); }
+  details summary { cursor: pointer; }
+  .settings { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+  .settings label { display: flex; flex-direction: column; gap: 2px; }
+  .settings input { width: 130px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn {
+    border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 7px 16px;
+    cursor: pointer; font-weight: 500;
+  }
+  .btn:hover:not(:disabled) { background: var(--accent-soft); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+  .btn.danger { color: var(--err); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.small { padding: 3px 10px; font-size: 13px; font-weight: 400; }
+  .result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  #result { flex: 1; min-height: 360px; font-size: 16px; line-height: 1.75; }
+  .meta { font-size: 13px; color: var(--muted); min-height: 1.6em; margin: 0; }
+  .meta.error { color: var(--err); }
+  .meta.warn { color: var(--warn); }
+  .hidden { display: none !important; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+    padding: 8px 16px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pathumma OCR <span>อ่านข้อความภาษาไทยจากรูปภาพ</span></h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">กำลังเชื่อมต่อ…</span></div>
+</header>
+
+<main>
+  <section class="panel" id="imagePanel" aria-label="รูปภาพ">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button">
+      <strong>ลากรูปหรือ PDF มาวาง หรือคลิกเพื่อเลือกไฟล์</strong>
+      <span>เลือกได้หลายไฟล์พร้อมกัน · PDF จะถูกแยกเป็นทีละหน้า</span>
+      <small>หรือกด Ctrl+V เพื่อวางรูปจากคลิปบอร์ด · JPG, PNG, WEBP, BMP, PDF</small>
+    </div>
+    <p class="meta hidden" id="busy" aria-live="polite"></p>
+    <div id="viewer" class="hidden">
+      <div class="preview"><img id="previewImg" alt="รูปที่เลือก"></div>
+    </div>
+    <div class="file-row hidden" id="fileRow">
+      <p class="filename" id="filename"></p>
+      <button class="btn small" id="clearBtn">ล้างทั้งหมด</button>
+    </div>
+    <div class="thumbs hidden" id="thumbs"></div>
+    <input type="file" id="fileInput" accept="image/*,application/pdf,.pdf" multiple hidden>
+  </section>
+
+  <section class="panel" aria-label="ผลลัพธ์">
+    <div>
+      <p class="label">คำสั่ง</p>
+      <div class="chips" id="chips">
+        <button class="chip" data-prompt="อ่านข้อความในภาพนี้">อ่านข้อความ</button>
+        <button class="chip" data-prompt="แปลงเอกสารในภาพนี้เป็น Markdown">แปลงเป็น Markdown</button>
+      </div>
+    </div>
+    <textarea id="prompt" rows="2">อ่านข้อความในภาพนี้</textarea>
+    <p class="meta">โมเดลนี้ฝึกมาเพื่อ OCR โดยเฉพาะ คำสั่งแนวถามตอบหรือสรุปมักได้ข้อความทั้งหมดในภาพกลับมาแทน</p>
+    <details>
+      <summary>ตั้งค่าเพิ่มเติม</summary>
+      <div class="settings">
+        <label>Max tokens<input type="number" id="maxTokens" value="2048" min="16" max="8192" step="64"></label>
+        <label>Repetition penalty<input type="number" id="repPen" value="1.0" min="1" max="1.5" step="0.01"></label>
+      </div>
+      <p>ถ้าผลลัพธ์มีข้อความวนซ้ำ ลองปรับ repetition penalty เป็น 1.05</p>
+    </details>
+    <div class="actions">
+      <button class="btn primary" id="runBtn" disabled>อ่านข้อความ</button>
+      <button class="btn hidden" id="runAllBtn">อ่านทุกรูป</button>
+      <button class="btn danger hidden" id="stopBtn">หยุด</button>
+    </div>
+    <div class="result-head">
+      <p class="label">ผลลัพธ์ (แก้ไขได้)</p>
+      <div class="actions">
+        <button class="btn small" id="copyBtn">คัดลอก</button>
+        <button class="btn small" id="downloadBtn">ดาวน์โหลด .txt</button>
+        <button class="btn small hidden" id="downloadAllBtn">ดาวน์โหลดรวมทุกหน้า</button>
+      </div>
+    </div>
+    <textarea id="result" placeholder="ผลลัพธ์จะแสดงที่นี่"></textarea>
+    <p class="meta" id="meta" aria-live="polite"></p>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const DEFAULT_PROMPT = "อ่านข้อความในภาพนี้";
+const $ = (s) => document.querySelector(s);
+const state = { items: [], current: -1, controller: null, running: false, stopAll: false };
+let nextId = 1;
+
+// ---------- files ----------
+const isPdf = (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+const baseName = (name) => name.replace(/\.[^.]+$/, "");
+
+// pdf = { name, page, pages } for items that came from a PDF page
+function pushItem(file, pdf = null) {
+  const label = pdf ? `${pdf.name} · หน้า ${pdf.page}/${pdf.pages}` : file.name;
+  state.items.push({ id: nextId++, file, pdf, label, url: URL.createObjectURL(file), result: "", status: "idle", meta: "", metaClass: "" });
+}
+
+async function addPdf(f) {
+  setBusy(`กำลังแปลง ${f.name} เป็นรูปทีละหน้า…`);
+  try {
+    const fd = new FormData();
+    fd.append("file", f);
+    const res = await fetch("/pdf/render", { method: "POST", body: fd });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.detail || `HTTP ${res.status}`);
+    for (const p of j.pages) {
+      const blob = await (await fetch(p.image)).blob();
+      const file = new File([blob], `${baseName(f.name)}-p${p.page}.jpg`, { type: blob.type });
+      pushItem(file, { name: f.name, page: p.page, pages: j.page_count });
+    }
+    toast(`${f.name}: ${j.page_count} หน้า`);
+  } catch (e) {
+    toast(`เปิด ${f.name} ไม่ได้: ${e.message}`, 4000);
+  } finally {
+    setBusy("");
+  }
+}
+
+let adding = Promise.resolve();
+function addFiles(files) {
+  const list = [...files];
+  // chain so files dropped in quick succession keep their order
+  adding = adding.then(async () => {
+    const first = state.items.length;
+    for (const f of list) {
+      if (isPdf(f)) await addPdf(f);
+      else if (f.type.startsWith("image/")) pushItem(f);
+      else toast(`ไม่รองรับไฟล์ ${f.name}`);
+    }
+    if (state.items.length > first) select(first);
+  });
+  return adding;
+}
+
+function setBusy(msg) {
+  $("#busy").textContent = msg;
+  $("#busy").classList.toggle("hidden", !msg);
+}
+
+function removeItem(idx) {
+  const it = state.items[idx];
+  if (it.status === "running") return toast("กำลังอ่านรูปนี้อยู่ กดหยุดก่อน");
+  URL.revokeObjectURL(it.url);
+  state.items.splice(idx, 1);
+  select(Math.min(state.current, state.items.length - 1));
+}
+
+function clearAll() {
+  if (state.running) return toast("กำลังอ่านอยู่ กดหยุดก่อน");
+  state.items.forEach((it) => URL.revokeObjectURL(it.url));
+  state.items = [];
+  select(-1);
+}
+
+function select(idx) {
+  state.current = idx;
+  render();
+}
+
+const currentItem = () => state.items[state.current];
+
+// ---------- rendering ----------
+function render() {
+  const it = currentItem();
+  $("#dropzone").classList.toggle("hidden", !!it);
+  $("#viewer").classList.toggle("hidden", !it);
+  $("#fileRow").classList.toggle("hidden", !it);
+  $("#thumbs").classList.toggle("hidden", !it);
+  if (it) {
+    $("#previewImg").src = it.url;
+    $("#filename").textContent = it.pdf ? it.label : `${it.label} · ${(it.file.size / 1024).toFixed(0)} KB`;
+  }
+  renderThumbs();
+  showResult();
+  updateButtons();
+}
+
+function renderThumbs() {
+  const box = $("#thumbs");
+  box.replaceChildren();
+  state.items.forEach((it, i) => {
+    const b = document.createElement("button");
+    b.className = "thumb" + (i === state.current ? " active" : "");
+    b.title = it.label;
+    b.onclick = () => select(i);
+    const img = document.createElement("img");
+    img.src = it.url;
+    img.alt = "";
+    const badge = document.createElement("span");
+    badge.className = "badge " + it.status;
+    badge.textContent = { idle: i + 1, running: "…", done: "✓", error: "!" }[it.status];
+    const x = document.createElement("span");
+    x.className = "remove";
+    x.textContent = "×";
+    x.title = "ลบรูปนี้";
+    x.onclick = (e) => { e.stopPropagation(); removeItem(i); };
+    b.append(img, badge, x);
+    box.append(b);
+  });
+  const add = document.createElement("button");
+  add.className = "thumb add";
+  add.textContent = "+";
+  add.title = "เพิ่มรูป";
+  add.onclick = () => $("#fileInput").click();
+  box.append(add);
+}
+
+function showResult() {
+  const it = currentItem();
+  const out = $("#result");
+  out.value = it ? it.result : "";
+  if (it && it.status === "running") out.scrollTop = out.scrollHeight;
+  $("#meta").textContent = it ? it.meta : "";
+  $("#meta").className = "meta " + (it ? it.metaClass : "");
+}
+
+function updateButtons() {
+  const it = currentItem();
+  const pending = state.items.filter((x) => x.status !== "done").length;
+  $("#runBtn").disabled = !it || state.running || !serverOk;
+  $("#runBtn").textContent = it && it.status === "done" ? "อ่านใหม่" : "อ่านข้อความ";
+  $("#runAllBtn").classList.toggle("hidden", state.items.length < 2);
+  $("#runAllBtn").disabled = state.running || !pending || !serverOk;
+  $("#runAllBtn").textContent = `อ่านทุกรูปที่ยังไม่อ่าน (${pending})`;
+  $("#stopBtn").classList.toggle("hidden", !state.running);
+  $("#downloadAllBtn").classList.toggle("hidden", state.items.length < 2);
+}
+
+// ---------- OCR ----------
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error("อ่านไฟล์ไม่ได้"));
+    r.readAsDataURL(file);
+  });
+}
+
+async function* sseEvents(body) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      for (const line of block.split("\n")) if (line.startsWith("data: ")) yield line.slice(6);
+    }
+  }
+}
+
+async function ocr(it) {
+  it.status = "running";
+  it.result = "";
+  it.meta = "กำลังอ่าน…";
+  it.metaClass = "";
+  renderThumbs();
+  if (it === currentItem()) showResult();
+
+  const t0 = performance.now();
+  const ctrl = (state.controller = new AbortController());
+  const tick = setInterval(() => {
+    it.meta = `กำลังอ่าน… ${((performance.now() - t0) / 1000).toFixed(0)} วินาที`;
+    if (it === currentItem()) $("#meta").textContent = it.meta;
+  }, 1000);
+  try {
+    const body = {
+      stream: true,
+      max_tokens: parseInt($("#maxTokens").value, 10) || 2048,
+      repetition_penalty: parseFloat($("#repPen").value) || 1.0,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: await fileToDataURL(it.file) } },
+          { type: "text", text: $("#prompt").value.trim() || DEFAULT_PROMPT },
+        ],
+      }],
+    };
+    const res = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${res.status}`);
+    }
+    let finish = null;
+    for await (const ev of sseEvents(res.body)) {
+      if (ev === "[DONE]") break;
+      const c = JSON.parse(ev).choices[0];
+      if (c.delta && c.delta.content) {
+        it.result += c.delta.content;
+        if (it === currentItem()) {
+          const out = $("#result");
+          out.value = it.result;
+          out.scrollTop = out.scrollHeight;
+        }
+      }
+      if (c.finish_reason) finish = c.finish_reason;
+    }
+    if (finish === "error") throw new Error("server ประมวลผลไม่สำเร็จ (ดู log ของ server)");
+    // the model escapes numbered lists Markdown-style ("1\. item"); show plain text
+    it.result = it.result.trim().replace(/^(\s*\d+)\\\./gm, "$1.");
+    it.status = "done";
+    it.meta = `เสร็จใน ${((performance.now() - t0) / 1000).toFixed(1)} วินาที · ${it.result.length.toLocaleString()} ตัวอักษร`;
+    if (finish === "length") {
+      it.meta += " · ข้อความอาจถูกตัด (ถึง max tokens)";
+      it.metaClass = "warn";
+    }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      it.status = "idle";
+      it.meta = it.result ? "หยุดแล้ว (ได้ผลบางส่วน)" : "หยุดแล้ว";
+      it.metaClass = "warn";
+    } else {
+      it.status = "error";
+      it.meta = "ผิดพลาด: " + e.message;
+      it.metaClass = "error";
+    }
+  } finally {
+    clearInterval(tick);
+    state.controller = null;
+    renderThumbs();
+    if (it === currentItem()) showResult();
+  }
+}
+
+async function run(items) {
+  state.running = true;
+  state.stopAll = false;
+  updateButtons();
+  for (const it of items) {
+    if (state.stopAll) break;
+    if (!state.items.includes(it)) continue;
+    select(state.items.indexOf(it));
+    await ocr(it);
+  }
+  state.running = false;
+  updateButtons();
+}
+
+// ---------- events ----------
+const fileInput = $("#fileInput");
+fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+$("#dropzone").onclick = () => fileInput.click();
+$("#dropzone").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } };
+
+const panel = $("#imagePanel");
+panel.addEventListener("dragover", (e) => { e.preventDefault(); panel.classList.add("dragover"); });
+panel.addEventListener("dragleave", (e) => { if (!panel.contains(e.relatedTarget)) panel.classList.remove("dragover"); });
+panel.addEventListener("drop", (e) => { e.preventDefault(); panel.classList.remove("dragover"); addFiles(e.dataTransfer.files); });
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+window.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+
+$("#chips").onclick = (e) => {
+  const p = e.target.dataset && e.target.dataset.prompt;
+  if (p) $("#prompt").value = p;
+};
+$("#runBtn").onclick = () => currentItem() && run([currentItem()]);
+$("#runAllBtn").onclick = () => run(state.items.filter((x) => x.status !== "done"));
+$("#stopBtn").onclick = () => { state.stopAll = true; if (state.controller) state.controller.abort(); };
+$("#result").oninput = () => { const it = currentItem(); if (it && it.status !== "running") it.result = $("#result").value; };
+
+$("#copyBtn").onclick = async () => {
+  const text = $("#result").value;
+  if (!text) return toast("ยังไม่มีข้อความ");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    $("#result").select();
+    document.execCommand("copy");
+  }
+  toast("คัดลอกแล้ว");
+};
+function downloadText(text, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+$("#downloadBtn").onclick = () => {
+  const text = $("#result").value;
+  if (!text) return toast("ยังไม่มีข้อความ");
+  const it = currentItem();
+  downloadText(text, (it ? baseName(it.file.name) : "ocr") + ".txt");
+};
+
+$("#downloadAllBtn").onclick = () => {
+  const withText = state.items.filter((it) => it.result);
+  if (!withText.length) return toast("ยังไม่มีข้อความ");
+  const missing = state.items.length - withText.length;
+  // all from the same PDF -> name the file after it and label sections by page only
+  const sources = new Set(state.items.map((it) => (it.pdf ? it.pdf.name : it.file.name)));
+  const onePdf = sources.size === 1 && state.items[0].pdf;
+  const text = withText
+    .map((it) => `===== ${onePdf ? `หน้า ${it.pdf.page}` : it.label} =====\n${it.result}`)
+    .join("\n\n");
+  downloadText(text, onePdf ? baseName(state.items[0].pdf.name) + ".txt" : "ocr-results.txt");
+  if (missing) toast(`ข้าม ${missing} หน้าที่ยังไม่ได้อ่าน`, 3000);
+};
+$("#clearBtn").onclick = clearAll;
+
+let toastTimer;
+function toast(msg, ms = 1800) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), ms);
+}
+
+// ---------- server status ----------
+let serverOk = false;
+async function checkHealth() {
+  try {
+    const h = await (await fetch("/health")).json();
+    serverOk = h.status === "ok";
+    $("#dot").className = "dot ok";
+    $("#statusText").textContent = `พร้อมใช้งาน · ${h.model.split("/").pop()} · ${h.device.toUpperCase()}`;
+  } catch {
+    serverOk = false;
+    $("#dot").className = "dot err";
+    $("#statusText").textContent = "เชื่อมต่อ server ไม่ได้";
+  }
+  updateButtons();
+}
+checkHealth();
+setInterval(checkHealth, 15000);
+render();
+</script>
+</body>
+</html>

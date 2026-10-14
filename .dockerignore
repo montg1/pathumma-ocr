@@ -1,0 +1,5 @@
+# Only what the image needs
+*
+!server.py
+!requirements.txt
+!web
