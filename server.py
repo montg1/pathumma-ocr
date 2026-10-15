@@ -1,4 +1,7 @@
-"""OpenAI-compatible inference server for nectec/Pathumma-llm-vision-3.0.0-preview.
+"""OCR front-end for nectec/Pathumma-llm-vision-3.0.0-preview served by vLLM.
+
+Inference runs in a vLLM server (VLLM_URL); this app adds the web UI, image downscaling,
+PDF splitting and the /ocr upload endpoint, and forwards chat requests to vLLM.
 
 Endpoints
   GET  /                       - web UI: upload images and OCR them
@@ -9,39 +12,31 @@ Endpoints
   POST /pdf/render             - multipart upload: file=<PDF> -> one image per page (used by the web UI)
   GET  /docs                   - Swagger UI for trying the endpoints
 
-Config via env vars: MODEL_ID, HOST, PORT, MAX_PIXELS, DEFAULT_MAX_TOKENS, WARMUP (1/0),
-MAX_PDF_PAGES, PDF_MAX_DPI.
+Config via env vars: VLLM_URL, MODEL_ID, HOST, PORT, MAX_PIXELS, DEFAULT_MAX_TOKENS,
+MAX_PDF_PAGES, PDF_MAX_DPI, OCR_CONCURRENCY.
 """
 import asyncio
 import base64
 import binascii
 import io
-import json
 import math
 import os
 import re
 import threading
 import time
-import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Union
 
 import pypdfium2 as pdfium
 import requests
-import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel
-from transformers import (
-    AutoProcessor,
-    Qwen3_5ForConditionalGeneration,
-    StoppingCriteria,
-    StoppingCriteriaList,
-    TextIteratorStreamer,
-)
 
+VLLM_URL = os.getenv("VLLM_URL", "http://127.0.0.1:8001").rstrip("/")
 MODEL_ID = os.getenv("MODEL_ID", "nectec/Pathumma-llm-vision-3.0.0-preview")
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
@@ -53,20 +48,9 @@ WEB_DIR = Path(__file__).parent / "web"
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "100"))
 # PDF pages are rendered to fill MAX_PIXELS, but never above this DPI (small pages).
 PDF_MAX_DPI = int(os.getenv("PDF_MAX_DPI", "300"))
+# PDF pages sent to vLLM at once (vLLM batches them; extra ones wait in its queue)
+OCR_CONCURRENCY = int(os.getenv("OCR_CONCURRENCY", "4"))
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Loading {MODEL_ID} on {device} ...", flush=True)
-model = Qwen3_5ForConditionalGeneration.from_pretrained(
-    MODEL_ID,
-    dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-    device_map=device,
-)
-model.eval()
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-eos_ids = model.generation_config.eos_token_id
-eos_ids = set(eos_ids if isinstance(eos_ids, list) else [eos_ids])
-# One GPU, one generation at a time.
-gpu_lock = threading.Lock()
 # pdfium is not thread-safe; every pdfium call goes through this lock.
 pdf_lock = threading.Lock()
 
@@ -142,9 +126,9 @@ def to_data_url(img: Image.Image) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def to_template(messages) -> tuple:
-    """Convert OpenAI-style messages to the model's chat format + list of PIL images."""
-    conv, images = [], []
+def to_openai(messages) -> list:
+    """Downscale every image to MAX_PIXELS and inline it as a data URL for vLLM."""
+    out = []
     for m in messages:
         content = m.content
         if isinstance(content, list):
@@ -159,50 +143,48 @@ def to_template(messages) -> tuple:
                         url = url.get("url")
                     if not url:
                         raise HTTPException(400, "image item has no url")
-                    images.append(load_image(url))
-                    parts.append({"type": "image"})
+                    parts.append({"type": "image_url", "image_url": {"url": to_data_url(load_image(url))}})
                 else:
                     raise HTTPException(400, f"Unsupported content type: {kind}")
             content = parts
-        conv.append({"role": m.role, "content": content})
-    return conv, images
+        out.append({"role": m.role, "content": content})
+    return out
 
 
-def build_inputs(conv, images):
-    prompt = processor.apply_chat_template(conv, tokenize=False, add_generation_prompt=True)
-    inputs = processor(text=[prompt], images=images or None, return_tensors="pt")
-    return inputs.to(model.device)
+def vllm_post(body: dict, stream: bool = False) -> requests.Response:
+    try:
+        r = requests.post(f"{VLLM_URL}/v1/chat/completions", json={"model": MODEL_ID, **body},
+                          stream=stream, timeout=(10, 600))
+    except requests.RequestException as e:
+        raise HTTPException(503, f"vLLM is not reachable: {e}")
+    if r.status_code != 200:
+        try:
+            err = r.json()
+            msg = err.get("message") or err.get("error", {}).get("message") or r.text
+        except ValueError:
+            msg = r.text
+        r.close()
+        raise HTTPException(r.status_code, f"vLLM: {msg}")
+    return r
 
 
-def gen_kwargs(max_tokens: int, temperature: float, top_p: float, repetition_penalty: float) -> dict:
-    kw = dict(max_new_tokens=max_tokens, use_cache=True, repetition_penalty=repetition_penalty)
-    if temperature and temperature > 0:
-        kw.update(do_sample=True, temperature=temperature, top_p=top_p)
-    else:
-        kw.update(do_sample=False)
-    return kw
-
-
-def finish_reason(new_tokens, max_tokens: int) -> str:
-    if len(new_tokens) >= max_tokens and int(new_tokens[-1]) not in eos_ids:
-        return "length"
-    return "stop"
-
-
-def generate(inputs, kw) -> tuple:
-    with gpu_lock, torch.inference_mode():
-        out = model.generate(**inputs, **kw)
-    new = out[0, inputs.input_ids.shape[1]:]
-    text = processor.decode(new, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-    return text.strip(), len(new), finish_reason(new, kw["max_new_tokens"])
-
-
-class _Cancelled(StoppingCriteria):
-    def __init__(self, event: threading.Event):
-        self.event = event
-
-    def __call__(self, input_ids, scores, **kwargs):
-        return torch.full((input_ids.shape[0],), self.event.is_set(), dtype=torch.bool, device=input_ids.device)
+def ocr_image(img: Image.Image, prompt: str, max_tokens: int, repetition_penalty: float) -> dict:
+    data = vllm_post({
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": to_data_url(img)}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "repetition_penalty": repetition_penalty,
+    }).json()
+    c = data["choices"][0]
+    return {
+        "text": clean_ocr_text(c["message"]["content"].strip()),
+        "completion_tokens": data["usage"]["completion_tokens"],
+        "finish_reason": c["finish_reason"],
+        "image_size": list(img.size),
+    }
 
 
 # ---------- API ----------
@@ -230,7 +212,11 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL_ID, "device": device, "max_pixels": MAX_PIXELS}
+    try:
+        requests.get(f"{VLLM_URL}/health", timeout=5).raise_for_status()
+    except requests.RequestException:
+        raise HTTPException(503, "vLLM is not ready")
+    return {"status": "ok", "model": MODEL_ID, "device": "vllm", "max_pixels": MAX_PIXELS}
 
 
 @app.get("/v1/models")
@@ -240,74 +226,28 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest):
-    max_tokens = req.max_completion_tokens or req.max_tokens or DEFAULT_MAX_TOKENS
-    conv, images = to_template(req.messages)
-    inputs = build_inputs(conv, images)
-    kw = gen_kwargs(max_tokens, req.temperature, req.top_p, req.repetition_penalty)
-    req_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
-
-    if req.stream:
-        return StreamingResponse(_stream(inputs, kw, req_id, created), media_type="text/event-stream")
-
-    text, n_out, finish = generate(inputs, kw)
-    n_in = inputs.input_ids.shape[1]
-    return {
-        "id": req_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": MODEL_ID,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish}],
-        "usage": {"prompt_tokens": n_in, "completion_tokens": n_out, "total_tokens": n_in + n_out},
+    body = {
+        "messages": to_openai(req.messages),
+        "max_tokens": req.max_completion_tokens or req.max_tokens or DEFAULT_MAX_TOKENS,
+        "temperature": req.temperature,
+        "top_p": req.top_p,
+        "repetition_penalty": req.repetition_penalty,
+        "stream": req.stream,
     }
+    r = vllm_post(body, stream=req.stream)
+    if not req.stream:
+        return r.json()
 
-
-async def _stream(inputs, kw, req_id, created):
-    def chunk(delta: dict, finish: Optional[str] = None) -> str:
-        body = {
-            "id": req_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": MODEL_ID,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
-        return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
-
-    streamer = TextIteratorStreamer(processor.tokenizer, skip_prompt=True, skip_special_tokens=True)
-    cancelled = threading.Event()
-    result = {}
-
-    # The worker owns the GPU lock, so a client that disconnects mid-stream
-    # can never leave the lock held by a suspended generator.
-    def run():
+    async def relay():
+        # Starlette cancels this on client disconnect; closing the upstream socket makes vLLM abort the request
+        chunks = r.iter_content(chunk_size=None)
         try:
-            with gpu_lock, torch.inference_mode():
-                result["out"] = model.generate(
-                    **inputs, **kw, streamer=streamer, stopping_criteria=StoppingCriteriaList([_Cancelled(cancelled)])
-                )
-        except Exception as e:  # unblock the consumer if generation fails
-            result["error"] = e
-            streamer.end()
+            while (chunk := await asyncio.to_thread(next, chunks, None)) is not None:
+                yield chunk
+        finally:
+            r.close()
 
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    pieces = iter(streamer)
-    done = object()
-    try:
-        yield chunk({"role": "assistant", "content": ""})
-        while (piece := await asyncio.to_thread(next, pieces, done)) is not done:
-            if piece:
-                yield chunk({"content": piece})
-        await asyncio.to_thread(worker.join)
-        if "error" in result:
-            yield chunk({}, "error")
-        else:
-            new = result["out"][0, inputs.input_ids.shape[1]:]
-            yield chunk({}, finish_reason(new, kw["max_new_tokens"]))
-        yield "data: [DONE]\n\n"
-    finally:
-        # client disconnected (or finished): stop generating at the next token
-        cancelled.set()
+    return StreamingResponse(relay(), media_type="text/event-stream")
 
 
 @app.post("/ocr")
@@ -318,31 +258,21 @@ def ocr(
     repetition_penalty: float = Form(1.0),
 ):
     data = file.file.read()
-    conv = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-    kw = gen_kwargs(max_tokens, 0, 1.0, repetition_penalty)
     t0 = time.time()
 
     if is_pdf(data):
-        pages = []
-        for i, img in enumerate(pdf_pages(data), start=1):
-            text, n_out, finish = generate(build_inputs(conv, [img]), kw)
-            pages.append({"page": i, "text": clean_ocr_text(text), "completion_tokens": n_out, "finish_reason": finish,
-                          "image_size": list(img.size)})
+        # ponytail: renders every page up front (~6 MB each, MAX_PDF_PAGES caps it); stream pages if that bites
+        with ThreadPoolExecutor(OCR_CONCURRENCY) as ex:
+            results = list(ex.map(lambda img: ocr_image(img, prompt, max_tokens, repetition_penalty), pdf_pages(data)))
+        pages = [{"page": i, **res} for i, res in enumerate(results, start=1)]
         return {
             "text": "\n\n".join(p["text"] for p in pages),
             "pages": pages,
             "elapsed_s": round(time.time() - t0, 2),
         }
 
-    img = load_image(data)
-    text, n_out, finish = generate(build_inputs(conv, [img]), kw)
-    return {
-        "text": clean_ocr_text(text),
-        "completion_tokens": n_out,
-        "finish_reason": finish,
-        "image_size": list(img.size),
-        "elapsed_s": round(time.time() - t0, 2),
-    }
+    return {**ocr_image(load_image(data), prompt, max_tokens, repetition_penalty),
+            "elapsed_s": round(time.time() - t0, 2)}
 
 
 @app.post("/pdf/render")
@@ -357,16 +287,5 @@ def pdf_render(file: UploadFile = File(..., description="PDF file")):
     return {"page_count": len(pages), "pages": pages}
 
 
-def warmup():
-    """Compile/autotune the Triton kernels before the first real request."""
-    t0 = time.time()
-    img = Image.new("RGB", (512, 256), "white")
-    conv = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DEFAULT_OCR_PROMPT}]}]
-    generate(build_inputs(conv, [img]), gen_kwargs(8, 0, 1.0, 1.0))
-    print(f"Warmup done in {time.time() - t0:.1f}s", flush=True)
-
-
 if __name__ == "__main__":
-    if os.getenv("WARMUP", "1") == "1":
-        warmup()
     uvicorn.run(app, host=HOST, port=PORT)

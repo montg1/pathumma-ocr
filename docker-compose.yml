@@ -7,12 +7,34 @@ services:
       # Local machine only by default. Set OCR_BIND=0.0.0.0 to expose it on the LAN.
       - "${OCR_BIND:-127.0.0.1}:${OCR_PORT:-8000}:8000"
     environment:
+      VLLM_URL: http://vllm:8000
       MAX_PIXELS: ${MAX_PIXELS:-2000000}
       DEFAULT_MAX_TOKENS: ${DEFAULT_MAX_TOKENS:-2048}
       MAX_PDF_PAGES: ${MAX_PDF_PAGES:-100}
+    depends_on:
+      - vllm
+    restart: unless-stopped
+
+  vllm:
+    image: vllm/vllm-openai:v0.31.0
+    container_name: pathumma-vllm
+    # not published on the host; only the ocr service talks to it
+    command: >-
+      --model nectec/Pathumma-llm-vision-3.0.0-preview
+      --max-model-len 4096 --max-num-batched-tokens 4096
+      --limit-mm-per-prompt '{"image":1}'
+      --mm-processor-kwargs '{"max_pixels":${MAX_PIXELS:-2000000}}'
+      --enforce-eager
+      --gpu-memory-utilization ${VLLM_GPU_MEM:-0.85}
+      --max-num-seqs ${VLLM_MAX_SEQS:-4}
+      ${VLLM_EXTRA_ARGS:-}
+    environment:
+      HF_HOME: /data/huggingface
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     volumes:
-      # model weights (~4.4 GB, downloaded on first start) + Triton kernel cache
+      # model weights (~4.4 GB, downloaded on first start)
       - pathumma-data:/data
+    ipc: host
     deploy:
       resources:
         reservations:

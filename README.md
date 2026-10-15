@@ -1,21 +1,21 @@
 # Pathumma OCR
 
-บริการ OCR ภาษาไทยจากรูปภาพและ PDF โดยใช้โมเดล [nectec/Pathumma-llm-vision-3.0.0-preview](https://huggingface.co/nectec/Pathumma-llm-vision-3.0.0-preview) (Qwen3.5-2B ที่ NECTEC ฝึกเพิ่มสำหรับ OCR ภาษาไทย) รันบน GPU ในเครื่อง
+บริการ OCR ภาษาไทยจากรูปภาพและ PDF โดยใช้โมเดล [nectec/Pathumma-llm-vision-3.0.0-preview](https://huggingface.co/nectec/Pathumma-llm-vision-3.0.0-preview) (Qwen3.5-2B ที่ NECTEC ฝึกเพิ่มสำหรับ OCR ภาษาไทย) รันบน GPU ในเครื่องผ่าน [vLLM](https://github.com/vllm-project/vllm)
 
 - **หน้าเว็บ** อัปโหลดรูปหรือ PDF แล้วอ่านข้อความ แสดงผลแบบสตรีม คัดลอก/ดาวน์โหลดเป็น .txt ได้
 - **API** แบบ OpenAI-compatible (`/v1/chat/completions`) และ endpoint อัปโหลดไฟล์ตรง ๆ (`/ocr`)
 - **PDF** แยกเป็นรายหน้าอัตโนมัติ
-- รันได้ทั้งแบบ **Docker Compose** และแบบ **Python ตรงบน Windows**
+- รับหลาย request พร้อมกันได้ (vLLM ทำ batching ให้)
+- รันด้วย **Docker Compose** (2 service: `vllm` สำหรับโมเดล และ `ocr` สำหรับหน้าเว็บ/API)
 
 ## ความต้องการของระบบ
 
 | | ขั้นต่ำ |
 |---|---|
-| GPU | NVIDIA VRAM 8 GB (ทดสอบกับ RTX 3070 8 GB, ตัวโมเดลใช้ประมาณ 4.8 GB) |
+| GPU | NVIDIA ที่มี VRAM ว่างอย่างน้อย ~6.5 GB (vLLM ใช้ weights ~4.4 GB + CUDA/Triton ~1.4 GB + KV cache) |
 | Driver | NVIDIA driver ที่รองรับ CUDA 12.8 ขึ้นไป |
-| ดิสก์ | ~12 GB สำหรับ Docker image + 4.4 GB สำหรับ weights ของโมเดล |
+| ดิสก์ | ~20 GB สำหรับ image ของ vLLM + 4.4 GB สำหรับ weights ของโมเดล |
 | แบบ Docker | Docker Desktop (WSL2 backend) หรือ Docker บน Linux + NVIDIA Container Toolkit |
-| แบบไม่ใช้ Docker | Python 3.12 + [uv](https://docs.astral.sh/uv/) |
 
 ## เริ่มใช้งานด้วย Docker Compose (แนะนำ)
 
@@ -23,7 +23,7 @@
 docker compose up -d --build
 ```
 
-ครั้งแรกจะใช้เวลานาน: build image (~5–10 นาที ขึ้นกับความเร็วเน็ต) และดาวน์โหลดโมเดล 4.4 GB ตอนเริ่ม container ดูความคืบหน้าได้ด้วย
+ครั้งแรกจะใช้เวลานาน: ดาวน์โหลด image ของ vLLM และโมเดล 4.4 GB ตอนเริ่ม container ดูความคืบหน้าได้ด้วย
 
 ```bash
 docker compose logs -f
@@ -31,7 +31,7 @@ docker compose logs -f
 
 เมื่อเห็น `Uvicorn running on http://0.0.0.0:8000` ให้เปิด **http://127.0.0.1:8000**
 
-ครั้งต่อ ๆ ไปจะพร้อมใช้ในประมาณ 30 วินาที เพราะโมเดลและ kernel ที่ compile แล้วเก็บไว้ใน volume `pathumma-data`
+ครั้งต่อ ๆ ไปจะพร้อมใช้ในประมาณ 3 นาที (vLLM ต้อง profile หน่วยความจำและ warmup ทุกครั้ง) โมเดลเก็บไว้ใน volume `pathumma-data` ระหว่างนี้ `/health` จะตอบ 503
 
 | คำสั่ง | ใช้ทำอะไร |
 |---|---|
@@ -51,28 +51,23 @@ OCR_PORT=8000          # พอร์ตฝั่งเครื่อง host
 MAX_PIXELS=2000000
 DEFAULT_MAX_TOKENS=2048
 MAX_PDF_PAGES=100
+
+# vLLM: ปรับตาม VRAM ที่ว่าง
+VLLM_GPU_MEM=0.85      # สัดส่วน VRAM ทั้งการ์ดที่ vLLM จองได้ (ต้องไม่เกิน VRAM ที่ว่างจริง)
+VLLM_MAX_SEQS=4        # จำนวน request ที่ประมวลผลพร้อมกัน
+VLLM_EXTRA_ARGS=       # flag อื่นของ vLLM เช่น --kv-cache-memory=250000000
 ```
 
-## รันแบบไม่ใช้ Docker (Windows)
+ถ้า GPU ใช้ร่วมกับงานอื่นแล้ว vLLM OOM ให้ลด `VLLM_GPU_MEM` ให้พอดีกับ VRAM ที่ว่าง แล้วกำหนด KV cache เองให้เล็ก (`VLLM_EXTRA_ARGS=--kv-cache-memory=250000000 --max-num-batched-tokens=2048`) และลด `VLLM_MAX_SEQS` เหลือ 2 เพื่อเผื่อหน่วยความจำให้ Triton ตอนรัน
 
-สร้าง environment ไว้นอกโฟลเดอร์ OneDrive เพื่อไม่ให้ sync ไฟล์ torch หลาย GB
+## รันแบบไม่ใช้ Docker
 
-```powershell
-uv venv --python 3.12 "$env:USERPROFILE\.venvs\pathumma-vision"
-$py = "$env:USERPROFILE\.venvs\pathumma-vision\Scripts\python.exe"
-uv pip install --python $py torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python $py -r requirements.txt
+vLLM รันได้บน Linux (หรือ WSL2) เท่านั้น เริ่ม vLLM ด้วย flag เดียวกับใน `docker-compose.yml` แล้วชี้ `server.py` ไปที่มัน
+
+```bash
+pip install -r requirements.txt
+VLLM_URL=http://127.0.0.1:8001 python server.py
 ```
-
-เริ่ม server
-
-```powershell
-powershell -ExecutionPolicy Bypass -File start_server.ps1
-```
-
-ครั้งแรกจะดาวน์โหลดโมเดลไปไว้ที่ `%USERPROFILE%\.cache\huggingface`
-
-> รันแบบ Docker กับแบบนี้พร้อมกันไม่ได้ เพราะใช้พอร์ตเดียวกันและ VRAM 8 GB ไม่พอสำหรับโมเดล 2 ชุด ให้ `docker compose down` ก่อน
 
 ## หน้าเว็บ
 
@@ -150,27 +145,27 @@ python test_client.py receipt.jpg
 |---|---|---|
 | `HOST` | `127.0.0.1` (Docker: `0.0.0.0`) | address ที่ server ฟัง |
 | `PORT` | `8000` | พอร์ตของ server |
+| `VLLM_URL` | `http://127.0.0.1:8001` (Docker: `http://vllm:8000`) | vLLM server ที่ใช้รันโมเดล |
 | `MAX_PIXELS` | `2000000` | รูปที่ใหญ่กว่านี้จะถูกย่อก่อนส่งเข้าโมเดล เพิ่มได้ถ้าตัวอักษรเล็กอ่านไม่ออก แต่จะใช้ VRAM และเวลามากขึ้น |
 | `DEFAULT_MAX_TOKENS` | `2048` | ความยาวผลลัพธ์สูงสุดเมื่อไม่ได้ระบุ |
 | `MAX_PDF_PAGES` | `100` | จำนวนหน้า PDF สูงสุดต่อไฟล์ |
 | `PDF_MAX_DPI` | `300` | DPI สูงสุดตอนแปลงหน้า PDF (หน้าปกติจะถูกจำกัดด้วย `MAX_PIXELS` ก่อน เช่น A4 ≈ 144 DPI) |
-| `WARMUP` | `1` | compile kernel ตอนเริ่ม server เพื่อให้ request แรกไม่ช้า (`0` = ปิด) |
-| `MODEL_ID` | `nectec/Pathumma-llm-vision-3.0.0-preview` | โมเดลบน Hugging Face |
+| `OCR_CONCURRENCY` | `4` | จำนวนหน้า PDF ที่ส่งเข้า vLLM พร้อมกัน |
+| `MODEL_ID` | `nectec/Pathumma-llm-vision-3.0.0-preview` | ชื่อโมเดลที่ vLLM serve อยู่ |
 
-## ประสิทธิภาพ (RTX 3070 8 GB)
+## ประสิทธิภาพ (NVIDIA A30 ที่ใช้ร่วมกับงานอื่น, `VLLM_MAX_SEQS=2`)
 
 | งาน | เวลา |
 |---|---|
-| ใบเสร็จ 6 บรรทัด (95 tokens) | ~5 วินาที |
-| PDF หน้า A4 | ~3–5 วินาทีต่อหน้า |
-| เริ่ม server (โมเดลอยู่ในเครื่องแล้ว) | ~30 วินาที |
-
-ความเร็วนี้ได้จาก `flash-linear-attention` ถ้าไม่ได้ติดตั้งจะช้าลงประมาณ 1.7 เท่า
+| ใบเสร็จ 6 บรรทัด (94 tokens) | ~2.5 วินาที (request แรกหลังเริ่ม ~8 วินาที) |
+| ใบเสร็จ 8 ใบพร้อมกัน | ~10 วินาทีรวม |
+| PDF 2 หน้า | ~6 วินาทีรวม |
+| เริ่ม server (โมเดลอยู่ในเครื่องแล้ว) | ~3 นาที |
 
 ## ข้อจำกัด
 
 - โมเดลนี้ฝึกมาเพื่อ **OCR โดยเฉพาะ** คำสั่งแนวถามตอบ สรุป หรือดึงเป็น JSON มักได้ข้อความทั้งหมดในภาพกลับมาแทน
-- รับได้ทีละ request (มี 1 GPU) request อื่นจะรอคิว
+- `max_tokens` + ความยาว prompt ต้องไม่เกิน 4096 tokens (`--max-model-len`) รูปขนาด `MAX_PIXELS` ใช้ประมาณ 1,950 tokens
 - **ไม่มีระบบยืนยันตัวตน** ถ้าเปิดให้เครื่องอื่นใช้ (`OCR_BIND=0.0.0.0` หรือ `HOST=0.0.0.0`) ควรทำเฉพาะในเครือข่ายที่ไว้ใจได้
 - ลายมือเขียนยังอ่านได้ไม่ดี (ThaiOCRBench ส่วน handwritten = 0.33 ตาม model card)
 - ข้อความสั้นบรรทัดเดียวบางครั้งโมเดลตัดช่องว่างระหว่างคำทิ้ง
@@ -179,12 +174,11 @@ python test_client.py receipt.jpg
 ## โครงสร้างโปรเจกต์
 
 ```
-server.py            FastAPI server (โหลดโมเดล, API, แปลง PDF)
+server.py            FastAPI server (หน้าเว็บ, API, แปลง PDF, ส่งงานต่อให้ vLLM)
 web/index.html       หน้าเว็บ (ไฟล์เดียว ไม่พึ่ง CDN ใช้งาน offline ได้)
-requirements.txt     dependencies (ยกเว้น torch ที่ติดตั้งจาก index ของ CUDA)
+requirements.txt     dependencies ของ server.py (ไม่มี torch โมเดลรันใน vLLM)
 Dockerfile           image สำหรับ Docker
-docker-compose.yml   service + GPU + volume
-start_server.ps1     เริ่ม server แบบไม่ใช้ Docker บน Windows
+docker-compose.yml   service ocr + vllm (GPU) + volume
 test_client.py       สคริปต์ทดสอบ API
 ```
 
